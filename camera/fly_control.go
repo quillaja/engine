@@ -11,17 +11,7 @@ import (
 	"github.com/g3n/engine/window"
 )
 
-// qrot creates a quaterion from an angle in radians and an axis of rotation.
-func qrot(angle float32, axis *math32.Vector3) *math32.Quaternion {
-	// https://en.wikipedia.org/wiki/Quaternions_and_spatial_rotation
-	c, s := math32.Cos(angle/2.0), math32.Sin(angle/2.0)
-	x := axis.X * s
-	y := axis.Y * s
-	z := axis.Z * s
-
-	return math32.NewQuaternion(x, y, z, c)
-}
-
+// Notes:
 // fly camera allows user to move camera in "FPS" or "flight sim" style
 // movement.
 // - translation along 3 axes: forward/backward, up/down, left/right (strafe)
@@ -30,12 +20,12 @@ func qrot(angle float32, axis *math32.Vector3) *math32.Quaternion {
 // will also allow "zoom" (change fov), so +2 inputs.
 //
 // options
-// - clamp pitch to -90/+90 deg from horizontal (prevent loop-de-loops)
 // - look-spring - returns pitch to 0 deg when moving forward/backward
 // - mouse-look - captures cursor and makes mouse movements into pitch and yaw.
 // - invert pitch - inverts control of pitch so that normal "up" pitched "down", viceversa
 // - movements speeds
 // - buttons/etc
+// - rotation constraints
 //
 // internally, "right" will be +X, "up" will be +Y, and "forward" will be -Z
 // a right handed coordinate system mirroring OpenGL's camera conventions.
@@ -49,15 +39,14 @@ const (
 	Left
 	Up
 	Down
-	PitchUp
-	PitchDown
 	YawRight
 	YawLeft
+	PitchUp
+	PitchDown
 	RollRight
 	RollLeft
-	ZoomIn
 	ZoomOut
-	maxmovement = ZoomOut
+	ZoomIn
 )
 
 const degrees = math32.Pi / 180.0
@@ -67,19 +56,19 @@ type FlyControl struct {
 	core.Dispatcher         // Embedded event dispatcher
 	cam             *Camera // Controlled camera
 
-	position *math32.Vector3 // camera position in the world
-	rotation *math32.Vector3 // camera yaw, pitch, and roll (radians)
-	forward  *math32.Vector3 // forward direction of camera
-	up       *math32.Vector3 // up direction of camera
-	upWorld  *math32.Vector3 // The world up direction
+	position math32.Vector3 // camera position in the world
+	rotation math32.Vector3 // camera yaw, pitch, and roll (radians)
+	forward  math32.Vector3 // forward direction of camera
+	up       math32.Vector3 // up direction of camera
+	upWorld  math32.Vector3 // The world up direction
 
 	// Constraints map.
-	// translation movements aren't used.
-	// angular contraints are in radians.
+	// Translation movements aren't used.
+	// Angular contraints are in radians.
 	Constraints map[FlyMovement]float32
 
 	// Speeds map.
-	// translation movements in units/event,
+	// Translation movements in units/event,
 	// angular movement and zoom in radians/event.
 	Speeds map[FlyMovement]float32
 
@@ -87,9 +76,59 @@ type FlyControl struct {
 	Keys map[FlyMovement]window.Key
 }
 
-func NewFlyControl() *FlyControl {
+func NewFlyControl(cam *Camera, target, worldUp *math32.Vector3) *FlyControl {
 
 	fc := new(FlyControl)
+
+	fc.cam = cam
+	fc.position = cam.Position()
+	fc.Reorient(target, worldUp)
+
+	// TODO: speeds, keys, constraints need to be made into options
+	fc.Speeds = map[FlyMovement]float32{
+		Forward:   1,
+		Backward:  -1,
+		Right:     1,
+		Left:      -1,
+		Up:        1,
+		Down:      -1,
+		YawRight:  0.1,
+		YawLeft:   -0.1,
+		PitchUp:   0.1,
+		PitchDown: -0.1,
+		RollRight: 0.1,
+		RollLeft:  -0.1,
+		ZoomOut:   0.1,
+		ZoomIn:    -0.1,
+	}
+
+	fc.Keys = map[FlyMovement]window.Key{
+		Forward:   window.KeyUp,
+		Backward:  window.KeyDown,
+		Right:     window.KeyRight,
+		Left:      window.KeyLeft,
+		Up:        window.KeyPageUp,
+		Down:      window.KeyPageDown,
+		YawRight:  window.KeyD,
+		YawLeft:   window.KeyA,
+		PitchUp:   window.KeyW,
+		PitchDown: window.KeyS,
+		RollRight: window.KeyE,
+		RollLeft:  window.KeyQ,
+		ZoomOut:   window.KeyMinus,
+		ZoomIn:    window.KeyEqual,
+	}
+
+	fc.Constraints = map[FlyMovement]float32{
+		YawRight:  45 * degrees,
+		YawLeft:   -90 * degrees,
+		PitchUp:   45 * degrees,
+		PitchDown: -80 * degrees,
+		RollRight: 45 * degrees,
+		RollLeft:  -45 * degrees,
+		ZoomOut:   100.0 * degrees,
+		ZoomIn:    1.0 * degrees,
+	}
 
 	// Subscribe to events
 	// copied from orbit_control.go
@@ -107,13 +146,13 @@ func NewFlyControl() *FlyControl {
 // Dispose unsubscribes from all events.
 func (fc *FlyControl) Dispose() {
 	// copied from orbit_control.go
-	gui.Manager().UnsubscribeID(window.OnMouseUp, &fc)
-	gui.Manager().UnsubscribeID(window.OnMouseDown, &fc)
-	gui.Manager().UnsubscribeID(window.OnScroll, &fc)
+	// gui.Manager().UnsubscribeID(window.OnMouseUp, &fc)
+	// gui.Manager().UnsubscribeID(window.OnMouseDown, &fc)
+	// gui.Manager().UnsubscribeID(window.OnScroll, &fc)
 	gui.Manager().UnsubscribeID(window.OnKeyDown, &fc)
 	gui.Manager().UnsubscribeID(window.OnKeyRepeat, &fc)
-	gui.Manager().UnsubscribeID(window.OnKeyUp, &fc)
-	fc.UnsubscribeID(window.OnCursor, &fc)
+	// gui.Manager().UnsubscribeID(window.OnKeyUp, &fc)
+	// fc.UnsubscribeID(window.OnCursor, &fc)
 }
 
 func (fc *FlyControl) Reposition(position *math32.Vector3) {
@@ -122,9 +161,11 @@ func (fc *FlyControl) Reposition(position *math32.Vector3) {
 }
 
 func (fc *FlyControl) Reorient(target, worldUp *math32.Vector3) {
-	fc.forward = target.Clone().Sub(fc.position).Normalize()
+	fc.rotation.Set(0, 0, 0) // reset the total rotation
+	fc.upWorld.Copy(worldUp) // worldUp might have changed
+	fc.forward.Copy(target.Clone().Sub(&fc.position).Normalize())
 	right := fc.forward.Clone().Cross(worldUp).Normalize()
-	fc.up = right.Cross(fc.forward).Normalize()
+	fc.up.Copy(right.Cross(&fc.forward).Normalize())
 }
 
 // movement changes
@@ -132,20 +173,20 @@ func (fc *FlyControl) Reorient(target, worldUp *math32.Vector3) {
 func (fc *FlyControl) Forward(delta float32) {
 	deltaDir := fc.forward.Clone().MultiplyScalar(delta)
 	fc.position.Add(deltaDir)
-	fc.cam.SetPositionVec(fc.position)
+	fc.cam.SetPositionVec(&fc.position)
 }
 
 func (fc *FlyControl) Right(delta float32) {
 	// right direction from forward cross up
-	deltaDir := fc.forward.Clone().Cross(fc.up).MultiplyScalar(delta)
+	deltaDir := fc.forward.Clone().Cross(&fc.up).MultiplyScalar(delta)
 	fc.position.Add(deltaDir)
-	fc.cam.SetPositionVec(fc.position)
+	fc.cam.SetPositionVec(&fc.position)
 }
 
 func (fc *FlyControl) Up(delta float32) {
 	deltaDir := fc.up.Clone().MultiplyScalar(delta)
 	fc.position.Add(deltaDir)
-	fc.cam.SetPositionVec(fc.position)
+	fc.cam.SetPositionVec(&fc.position)
 }
 
 func (fc *FlyControl) Yaw(delta float32) {
@@ -153,21 +194,24 @@ func (fc *FlyControl) Yaw(delta float32) {
 	if fc.constraintOk(yaw, YawLeft, YawRight) {
 		fc.rotation.X = yaw
 		// rotation about up axis
-		fc.forward.ApplyAxisAngle(fc.up, delta)
-		fc.cam.RotateOnAxis(fc.up, delta)
+		// because of the right hand coord system, positive rotation about up-axis
+		// makes camera appear to yaw left instead of right. thus, delta
+		// must be inverted below.
+		fc.forward.ApplyAxisAngle(&fc.up, -delta)
+		fc.cam.LookAt(fc.position.Clone().Add(&fc.forward), &fc.up)
 	}
 }
 
 func (fc *FlyControl) Pitch(delta float32) {
 	pitch := fc.rotation.Y + delta
 	if fc.constraintOk(pitch, PitchDown, PitchUp) {
-		fc.rotation.Y = delta
+		fc.rotation.Y = pitch
 		// rotation about right axis
 		// affects both "forward" and "up" directions
-		right := fc.forward.Clone().Cross(fc.up)
+		right := fc.forward.Clone().Cross(&fc.up)
 		fc.forward.ApplyAxisAngle(right, delta)
 		fc.up.ApplyAxisAngle(right, delta)
-		fc.cam.RotateOnAxis(right, delta)
+		fc.cam.LookAt(fc.position.Clone().Add(&fc.forward), &fc.up)
 	}
 }
 
@@ -176,10 +220,12 @@ func (fc *FlyControl) Roll(delta float32) {
 	if fc.constraintOk(roll, RollLeft, RollRight) {
 		fc.rotation.Z = roll
 		// rotation about forward axis
-		fc.up.ApplyAxisAngle(fc.forward, delta)
-		fc.cam.RotateOnAxis(fc.forward, delta)
+		fc.up.ApplyAxisAngle(&fc.forward, delta)
+		fc.cam.LookAt(fc.position.Clone().Add(&fc.forward), &fc.up)
 	}
 }
+
+// Field of view changes
 
 func (fc *FlyControl) Zoom(delta float32) {
 	newFovRad := fc.cam.Fov()*degrees + delta
@@ -209,6 +255,7 @@ func (fc *FlyControl) constraintOk(newValue float32, low, high FlyMovement) bool
 	return true
 }
 
+// apply maps FlyMovements to the appropriate method.
 func (fc *FlyControl) apply(movement FlyMovement, delta float32) {
 	switch movement {
 	case Backward, Forward:
