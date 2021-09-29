@@ -5,10 +5,13 @@
 package camera
 
 import (
+	"fmt"
+
 	"github.com/g3n/engine/core"
 	"github.com/g3n/engine/gui"
 	"github.com/g3n/engine/math32"
 	"github.com/g3n/engine/window"
+	"github.com/go-gl/glfw/v3.3/glfw"
 )
 
 // Notes:
@@ -49,6 +52,27 @@ const (
 	ZoomIn
 )
 
+type MouseMotion int
+
+const (
+	MouseNone        MouseMotion = iota
+	MouseRight                   // +X
+	MouseLeft                    // -X
+	MouseDown                    // +Y
+	MouseUp                      // -Y
+	MouseScrollRight             // +X
+	MouseScrollLeft              // -X
+	MouseScrollDown              // +Y
+	MouseScrollUp                // -Y
+)
+
+const MouseButtonNone window.MouseButton = -1
+
+type MouseGuesture struct {
+	Motion MouseMotion
+	Button window.MouseButton
+}
+
 const degrees = math32.Pi / 180.0
 const radians = 1.0 / degrees
 
@@ -62,6 +86,11 @@ type FlyControl struct {
 	up       math32.Vector3 // up direction of camera
 	upWorld  math32.Vector3 // The world up direction
 
+	mouseIsCaptured  bool
+	mousePrevPos     math32.Vector2
+	mouseBtnState    uint32 // bitfield. btn0 == 2, btn1 == 4, etc
+	mouseSensitivity float32
+
 	// Constraints map.
 	// Translation movements aren't used.
 	// Angular contraints are in radians.
@@ -74,6 +103,9 @@ type FlyControl struct {
 
 	// Keys map.
 	Keys map[FlyMovement]window.Key
+
+	// Mouse map.
+	Mouse map[FlyMovement]MouseGuesture
 }
 
 func NewFlyControl(cam *Camera, target, worldUp *math32.Vector3) *FlyControl {
@@ -120,25 +152,41 @@ func NewFlyControl(cam *Camera, target, worldUp *math32.Vector3) *FlyControl {
 	}
 
 	fc.Constraints = map[FlyMovement]float32{
-		YawRight:  45 * degrees,
-		YawLeft:   -90 * degrees,
-		PitchUp:   45 * degrees,
-		PitchDown: -80 * degrees,
+		// YawRight:  45 * degrees,
+		// YawLeft:   -90 * degrees,
+		PitchUp:   90 * degrees,
+		PitchDown: -90 * degrees,
 		RollRight: 45 * degrees,
 		RollLeft:  -45 * degrees,
 		ZoomOut:   100.0 * degrees,
 		ZoomIn:    1.0 * degrees,
 	}
 
+	fc.mouseIsCaptured = false
+	fc.mousePrevPos = math32.Vector2{math32.NaN(), math32.NaN()}
+	fc.mouseBtnState = 0
+	fc.mouseSensitivity = 0.5
+
+	fc.Mouse = map[FlyMovement]MouseGuesture{
+		YawRight:  {Motion: MouseRight, Button: MouseButtonNone},
+		YawLeft:   {Motion: MouseLeft, Button: MouseButtonNone},
+		PitchUp:   {Motion: MouseUp, Button: MouseButtonNone},
+		PitchDown: {Motion: MouseDown, Button: MouseButtonNone},
+		ZoomIn:    {Motion: MouseScrollUp, Button: window.MouseButtonRight},
+		ZoomOut:   {Motion: MouseScrollDown, Button: window.MouseButtonRight},
+	}
+
 	// Subscribe to events
+	// fc.Dispatcher.Initialize()
 	// copied from orbit_control.go
-	// gui.Manager().SubscribeID(window.OnMouseUp, &fc, fc.onMouse)
-	// gui.Manager().SubscribeID(window.OnMouseDown, &fc, fc.onMouse)
-	// gui.Manager().SubscribeID(window.OnScroll, &fc, fc.onScroll)
+	gui.Manager().SubscribeID(window.OnMouseUp, &fc, fc.onMouse)
+	gui.Manager().SubscribeID(window.OnMouseDown, &fc, fc.onMouse)
+	gui.Manager().SubscribeID(window.OnScroll, &fc, fc.onScroll)
+	gui.Manager().SubscribeID(window.OnCursor, &fc, fc.onCursor)
+
 	gui.Manager().SubscribeID(window.OnKeyDown, &fc, fc.onKey)
 	gui.Manager().SubscribeID(window.OnKeyRepeat, &fc, fc.onKey)
 	// gui.Manager().SubscribeID(window.OnKeyUp, &fc, fc.onKeyUp)
-	// fc.SubscribeID(window.OnCursor, &fc, fc.onCursor)
 
 	return fc
 }
@@ -146,13 +194,14 @@ func NewFlyControl(cam *Camera, target, worldUp *math32.Vector3) *FlyControl {
 // Dispose unsubscribes from all events.
 func (fc *FlyControl) Dispose() {
 	// copied from orbit_control.go
-	// gui.Manager().UnsubscribeID(window.OnMouseUp, &fc)
-	// gui.Manager().UnsubscribeID(window.OnMouseDown, &fc)
-	// gui.Manager().UnsubscribeID(window.OnScroll, &fc)
+	gui.Manager().UnsubscribeID(window.OnMouseUp, &fc)
+	gui.Manager().UnsubscribeID(window.OnMouseDown, &fc)
+	gui.Manager().UnsubscribeID(window.OnScroll, &fc)
+	gui.Manager().UnsubscribeID(window.OnCursor, &fc)
+
 	gui.Manager().UnsubscribeID(window.OnKeyDown, &fc)
 	gui.Manager().UnsubscribeID(window.OnKeyRepeat, &fc)
 	// gui.Manager().UnsubscribeID(window.OnKeyUp, &fc)
-	// fc.UnsubscribeID(window.OnCursor, &fc)
 }
 
 func (fc *FlyControl) Reposition(position *math32.Vector3) {
@@ -275,76 +324,135 @@ func (fc *FlyControl) apply(movement FlyMovement, delta float32) {
 	}
 }
 
+func (fc *FlyControl) enableMouseCapture(enable bool) {
+	// NOTE: I think it's not really good here to cast the IWindow to *GlfwWindow.
+	// Defeats the purpose of having an interface and also makes the package
+	// rely on the glfw package.
+	if enable {
+		win := window.Get().(*window.GlfwWindow)
+		win.SetInputMode(glfw.InputMode(window.CursorInputMode), int(window.CursorDisabled))
+		fc.mouseIsCaptured = true
+	} else {
+		win := window.Get().(*window.GlfwWindow)
+		win.SetInputMode(glfw.InputMode(window.CursorInputMode), int(window.CursorNormal))
+		fc.mouseIsCaptured = false
+	}
+}
+
+func (fc *FlyControl) toggleMouseButton(button window.MouseButton) {
+	fc.mouseBtnState ^= 1 << (1 + int(button)) // toggle button state bit
+}
+
+func (fc *FlyControl) mouseButtonPressed(button window.MouseButton) bool {
+	if button == MouseButtonNone && fc.mouseBtnState == 0 {
+		return true
+	}
+	bit := uint32(1 << (1 + uint32(button)))
+	return fc.mouseBtnState&bit == bit
+}
+
+func (fc *FlyControl) resetMousePrevPosition() {
+	fc.mousePrevPos = math32.Vector2{math32.NaN(), math32.NaN()}
+}
+
+func (fc *FlyControl) isMousePrevPositionUnset() bool {
+	return math32.IsNaN(fc.mousePrevPos.X)
+}
+
 // copied from orbit_control.go
 
 // onMouse is called when an OnMouseDown/OnMouseUp event is received.
-/*func (fc *FlyControl) onMouse(evname string, ev interface{}) {
-
-	// If nothing enabled ignore event
-	if fc.enabled == OrbitNone {
-		return
-	}
-
-	switch evname {
-	case window.OnMouseDown:
-		gui.Manager().SetCursorFocus(fc)
-		mev := ev.(*window.MouseEvent)
-		switch mev.Button {
-		case window.MouseButtonLeft: // Rotate
-			if fc.enabled&OrbitRot != 0 {
-				fc.state = stateRotate
-				fc.rotStart.Set(mev.Xpos, mev.Ypos)
-			}
-		case window.MouseButtonMiddle: // Zoom
-			if fc.enabled&OrbitZoom != 0 {
-				fc.state = stateZoom
-				fc.zoomStart = mev.Ypos
-			}
-		case window.MouseButtonRight: // Pan
-			if fc.enabled&OrbitPan != 0 {
-				fc.state = statePan
-				fc.panStart.Set(mev.Xpos, mev.Ypos)
-			}
-		}
-	case window.OnMouseUp:
-		gui.Manager().SetCursorFocus(nil)
-		fc.state = stateNone
-	}
-}*/
+func (fc *FlyControl) onMouse(evname string, ev interface{}) {
+	mev := ev.(*window.MouseEvent)
+	fc.toggleMouseButton(mev.Button)
+	fmt.Println("mouse buttons:", fc.mouseBtnState)
+}
 
 // onCursor is called when an OnCursor event is received.
-/*func (fc *FlyControl) onCursor(evname string, ev interface{}) {
+func (fc *FlyControl) onCursor(evname string, ev interface{}) {
 
-	// If nothing enabled ignore event
-	if fc.enabled == OrbitNone || fc.state == stateNone {
+	if !fc.mouseIsCaptured {
 		return
 	}
 
 	mev := ev.(*window.CursorEvent)
-	switch fc.state {
-	case stateRotate:
-		c := -2 * math32.Pi * fc.RotSpeed / fc.winSize()
-		fc.Rotate(c*(mev.Xpos-fc.rotStart.X),
-			c*(mev.Ypos-fc.rotStart.Y))
-		fc.rotStart.Set(mev.Xpos, mev.Ypos)
-	case stateZoom:
-		fc.Zoom(fc.ZoomSpeed * (mev.Ypos - fc.zoomStart))
-		fc.zoomStart = mev.Ypos
-	case statePan:
-		fc.Pan(mev.Xpos-fc.panStart.X,
-			mev.Ypos-fc.panStart.Y)
-		fc.panStart.Set(mev.Xpos, mev.Ypos)
+	if fc.isMousePrevPositionUnset() {
+		fc.mousePrevPos.X = mev.Xpos
+		fc.mousePrevPos.Y = mev.Ypos
 	}
-}*/
+
+	const moderator = 0.5
+	dx := (mev.Xpos - fc.mousePrevPos.X) * moderator * fc.mouseSensitivity
+	dy := (mev.Ypos - fc.mousePrevPos.Y) * moderator * fc.mouseSensitivity
+	fc.mousePrevPos.X = mev.Xpos
+	fc.mousePrevPos.Y = mev.Ypos
+
+	mouseX := MouseNone
+	mouseY := MouseNone
+	if dx != 0 {
+		if dx > 0 {
+			mouseX = MouseRight
+		} else {
+			mouseX = MouseLeft
+		}
+	}
+	if dy != 0 {
+		if dy > 0 {
+			mouseY = MouseDown
+		} else {
+			mouseY = MouseUp
+		}
+	}
+	// fmt.Printf("mouse delta: %f %f, motion: %d %d\n", dx, dy, mouseX, mouseY)
+
+	for m, g := range fc.Mouse {
+		pressed := fc.mouseButtonPressed(g.Button)
+		if g.Motion == mouseX && pressed {
+			speed := fc.Speeds[m]
+			fc.apply(m, math32.Abs(dx)*speed)
+		}
+		if g.Motion == mouseY && pressed {
+			speed := fc.Speeds[m]
+			fc.apply(m, math32.Abs(dy)*speed)
+		}
+	}
+}
 
 // onScroll is called when an OnScroll event is received.
-/*func (fc *FlyControl) onScroll(evname string, ev interface{}) {
+func (fc *FlyControl) onScroll(evname string, ev interface{}) {
+	// x/y offset appears to always be +-1
+	sev := ev.(*window.ScrollEvent)
 
-	if fc.enabled&OrbitZoom != 0 {
-		sev := ev.(*window.ScrollEvent)
-		fc.Zoom(-sev.Yoffset)
+	scrollX := MouseNone
+	scrollY := MouseNone
+	if sev.Xoffset != 0 {
+		if sev.Xoffset > 0 {
+			scrollX = MouseScrollRight
+		} else {
+			scrollX = MouseScrollLeft
+		}
 	}
-}*/
+	if sev.Yoffset != 0 {
+		if sev.Yoffset > 0 {
+			scrollY = MouseScrollUp
+		} else {
+			scrollY = MouseScrollDown
+		}
+	}
+
+	for m, g := range fc.Mouse {
+		pressed := fc.mouseButtonPressed(g.Button)
+		if g.Motion == scrollX && pressed {
+			speed := fc.Speeds[m]
+			fc.apply(m, math32.Abs(sev.Xoffset)*speed)
+		}
+		if g.Motion == scrollY && pressed {
+			speed := fc.Speeds[m]
+			fc.apply(m, math32.Abs(sev.Yoffset)*speed)
+		}
+	}
+	fmt.Println("mouse scroll:", sev.Xoffset, sev.Yoffset, "scroll:", scrollX, scrollY)
+}
 
 // onKey is called when an OnKeyDown/OnKeyRepeat event is received.
 func (fc *FlyControl) onKey(evname string, ev interface{}) {
@@ -355,6 +463,13 @@ func (fc *FlyControl) onKey(evname string, ev interface{}) {
 	// }
 
 	kev := ev.(*window.KeyEvent)
+	if kev.Key == window.KeySpace {
+		fc.enableMouseCapture(!fc.mouseIsCaptured)
+		if !fc.mouseIsCaptured {
+			fc.resetMousePrevPosition()
+		}
+		return
+	}
 	// find which movement the key corresponds to
 	var movement FlyMovement = -1
 	for m, k := range fc.Keys {
