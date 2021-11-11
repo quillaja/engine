@@ -11,7 +11,6 @@ import (
 	"github.com/g3n/engine/gui"
 	"github.com/g3n/engine/math32"
 	"github.com/g3n/engine/window"
-	"github.com/go-gl/glfw/v3.3/glfw"
 )
 
 // Notes:
@@ -24,6 +23,7 @@ import (
 //
 // options
 // - look-spring - returns pitch to 0 deg when moving forward/backward
+//   - alternative: yaw about world up instead of camera up?
 // - mouse-look - captures cursor and makes mouse movements into pitch and yaw.
 // - invert pitch - inverts control of pitch so that normal "up" pitched "down", viceversa
 // - movements speeds
@@ -66,11 +66,13 @@ const (
 	MouseScrollUp                // -Y
 )
 
-const MouseButtonNone window.MouseButton = -1
+// const MouseButtonNone window.MouseButton = -1
 
 type MouseGuesture struct {
-	Motion MouseMotion
-	Button window.MouseButton
+	Motion   MouseMotion
+	Buttons  []window.MouseButton
+	Captured bool
+	// Keys    []window.Key
 }
 
 const degrees = math32.Pi / 180.0
@@ -88,7 +90,7 @@ type FlyControl struct {
 
 	mouseIsCaptured  bool
 	mousePrevPos     math32.Vector2
-	mouseBtnState    uint32 // bitfield. btn0 == 2, btn1 == 4, etc
+	mouseBtnState    uint32 // bitfield. btn0 == 1, btn1 == 2, btn3 == 4 etc
 	mouseSensitivity float32
 
 	// Constraints map.
@@ -154,26 +156,27 @@ func NewFlyControl(cam *Camera, target, worldUp *math32.Vector3) *FlyControl {
 	fc.Constraints = map[FlyMovement]float32{
 		// YawRight:  45 * degrees,
 		// YawLeft:   -90 * degrees,
-		PitchUp:   90 * degrees,
-		PitchDown: -90 * degrees,
+		PitchUp:   85 * degrees,
+		PitchDown: -85 * degrees,
 		RollRight: 45 * degrees,
 		RollLeft:  -45 * degrees,
 		ZoomOut:   100.0 * degrees,
 		ZoomIn:    1.0 * degrees,
 	}
 
+	// init mouse state
+	fc.resetMousePrevPosition()
 	fc.mouseIsCaptured = false
-	fc.mousePrevPos = math32.Vector2{math32.NaN(), math32.NaN()}
 	fc.mouseBtnState = 0
 	fc.mouseSensitivity = 0.5
 
 	fc.Mouse = map[FlyMovement]MouseGuesture{
-		YawRight:  {Motion: MouseRight, Button: MouseButtonNone},
-		YawLeft:   {Motion: MouseLeft, Button: MouseButtonNone},
-		PitchUp:   {Motion: MouseUp, Button: MouseButtonNone},
-		PitchDown: {Motion: MouseDown, Button: MouseButtonNone},
-		ZoomIn:    {Motion: MouseScrollUp, Button: window.MouseButtonRight},
-		ZoomOut:   {Motion: MouseScrollDown, Button: window.MouseButtonRight},
+		YawRight:  {Motion: MouseRight, Buttons: []window.MouseButton{window.MouseButtonLeft}},
+		YawLeft:   {Motion: MouseLeft, Buttons: []window.MouseButton{window.MouseButtonLeft}},
+		PitchUp:   {Motion: MouseUp, Buttons: []window.MouseButton{window.MouseButtonLeft}},
+		PitchDown: {Motion: MouseDown, Buttons: []window.MouseButton{window.MouseButtonLeft}},
+		ZoomIn:    {Motion: MouseScrollUp},
+		ZoomOut:   {Motion: MouseScrollDown},
 	}
 
 	// Subscribe to events
@@ -243,6 +246,7 @@ func (fc *FlyControl) Yaw(delta float32) {
 	if fc.constraintOk(yaw, YawLeft, YawRight) {
 		fc.rotation.X = yaw
 		// rotation about up axis
+		// affects only "forward" direction
 		// because of the right hand coord system, positive rotation about up-axis
 		// makes camera appear to yaw left instead of right. thus, delta
 		// must be inverted below.
@@ -269,6 +273,7 @@ func (fc *FlyControl) Roll(delta float32) {
 	if fc.constraintOk(roll, RollLeft, RollRight) {
 		fc.rotation.Z = roll
 		// rotation about forward axis
+		// affects only "up" direction
 		fc.up.ApplyAxisAngle(&fc.forward, delta)
 		fc.cam.LookAt(fc.position.Clone().Add(&fc.forward), &fc.up)
 	}
@@ -324,31 +329,41 @@ func (fc *FlyControl) apply(movement FlyMovement, delta float32) {
 	}
 }
 
-func (fc *FlyControl) enableMouseCapture(enable bool) {
-	// NOTE: I think it's not really good here to cast the IWindow to *GlfwWindow.
-	// Defeats the purpose of having an interface and also makes the package
-	// rely on the glfw package.
-	if enable {
-		win := window.Get().(*window.GlfwWindow)
-		win.SetInputMode(glfw.InputMode(window.CursorInputMode), int(window.CursorDisabled))
-		fc.mouseIsCaptured = true
-	} else {
-		win := window.Get().(*window.GlfwWindow)
-		win.SetInputMode(glfw.InputMode(window.CursorInputMode), int(window.CursorNormal))
-		fc.mouseIsCaptured = false
-	}
+// func (fc *FlyControl) enableMouseCapture(enable bool) {
+// 	// NOTE: I think it's not really good here to cast the IWindow to *GlfwWindow.
+// 	// Defeats the purpose of having an interface and also makes the package
+// 	// rely on the glfw package.
+// 	if enable {
+// 		win := window.Get().(*window.GlfwWindow)
+// 		win.SetInputMode(glfw.InputMode(window.CursorInputMode), int(window.CursorDisabled))
+// 		fc.mouseIsCaptured = true
+// 	} else {
+// 		win := window.Get().(*window.GlfwWindow)
+// 		win.SetInputMode(glfw.InputMode(window.CursorInputMode), int(window.CursorNormal))
+// 		fc.mouseIsCaptured = false
+// 	}
+// }
+
+func (fc *FlyControl) SetMouseIsCaptured(captured bool) {
+	fc.mouseIsCaptured = captured
+	fc.resetMousePrevPosition()
 }
 
 func (fc *FlyControl) toggleMouseButton(button window.MouseButton) {
-	fc.mouseBtnState ^= 1 << (1 + int(button)) // toggle button state bit
+	fc.mouseBtnState ^= 1 << button // toggle button state bit
+	// fc.mouseBtnState ^= 1 << (1 + int(button)) // toggle button state bit
 }
 
-func (fc *FlyControl) mouseButtonPressed(button window.MouseButton) bool {
-	if button == MouseButtonNone && fc.mouseBtnState == 0 {
+func (fc *FlyControl) mouseButtonsPressed(buttons ...window.MouseButton) bool {
+	if fc.mouseBtnState == 0 && len(buttons) == 0 {
 		return true
 	}
-	bit := uint32(1 << (1 + uint32(button)))
-	return fc.mouseBtnState&bit == bit
+	var bits uint32
+	for _, b := range buttons {
+		bits ^= uint32(1 << b)
+	}
+	// bit := uint32(1 << (1 + uint32(button)))
+	return fc.mouseBtnState == bits
 }
 
 func (fc *FlyControl) resetMousePrevPosition() {
@@ -371,17 +386,13 @@ func (fc *FlyControl) onMouse(evname string, ev interface{}) {
 // onCursor is called when an OnCursor event is received.
 func (fc *FlyControl) onCursor(evname string, ev interface{}) {
 
-	if !fc.mouseIsCaptured {
-		return
-	}
-
 	mev := ev.(*window.CursorEvent)
 	if fc.isMousePrevPositionUnset() {
 		fc.mousePrevPos.X = mev.Xpos
 		fc.mousePrevPos.Y = mev.Ypos
 	}
 
-	const moderator = 0.5
+	const moderator = 0.25
 	dx := (mev.Xpos - fc.mousePrevPos.X) * moderator * fc.mouseSensitivity
 	dy := (mev.Ypos - fc.mousePrevPos.Y) * moderator * fc.mouseSensitivity
 	fc.mousePrevPos.X = mev.Xpos
@@ -406,14 +417,17 @@ func (fc *FlyControl) onCursor(evname string, ev interface{}) {
 	// fmt.Printf("mouse delta: %f %f, motion: %d %d\n", dx, dy, mouseX, mouseY)
 
 	for m, g := range fc.Mouse {
-		pressed := fc.mouseButtonPressed(g.Button)
-		if g.Motion == mouseX && pressed {
-			speed := fc.Speeds[m]
-			fc.apply(m, math32.Abs(dx)*speed)
-		}
-		if g.Motion == mouseY && pressed {
-			speed := fc.Speeds[m]
-			fc.apply(m, math32.Abs(dy)*speed)
+		pressed := fc.mouseButtonsPressed(g.Buttons...)
+		captured := g.Captured == fc.mouseIsCaptured
+		if pressed && captured {
+			if g.Motion == mouseX {
+				speed := fc.Speeds[m]
+				fc.apply(m, math32.Abs(dx)*speed)
+			}
+			if g.Motion == mouseY {
+				speed := fc.Speeds[m]
+				fc.apply(m, math32.Abs(dy)*speed)
+			}
 		}
 	}
 }
@@ -441,14 +455,17 @@ func (fc *FlyControl) onScroll(evname string, ev interface{}) {
 	}
 
 	for m, g := range fc.Mouse {
-		pressed := fc.mouseButtonPressed(g.Button)
-		if g.Motion == scrollX && pressed {
-			speed := fc.Speeds[m]
-			fc.apply(m, math32.Abs(sev.Xoffset)*speed)
-		}
-		if g.Motion == scrollY && pressed {
-			speed := fc.Speeds[m]
-			fc.apply(m, math32.Abs(sev.Yoffset)*speed)
+		pressed := fc.mouseButtonsPressed(g.Buttons...)
+		captured := g.Captured == fc.mouseIsCaptured
+		if pressed && captured {
+			if g.Motion == scrollX {
+				speed := fc.Speeds[m]
+				fc.apply(m, math32.Abs(sev.Xoffset)*speed)
+			}
+			if g.Motion == scrollY {
+				speed := fc.Speeds[m]
+				fc.apply(m, math32.Abs(sev.Yoffset)*speed)
+			}
 		}
 	}
 	fmt.Println("mouse scroll:", sev.Xoffset, sev.Yoffset, "scroll:", scrollX, scrollY)
@@ -463,13 +480,14 @@ func (fc *FlyControl) onKey(evname string, ev interface{}) {
 	// }
 
 	kev := ev.(*window.KeyEvent)
-	if kev.Key == window.KeySpace {
-		fc.enableMouseCapture(!fc.mouseIsCaptured)
-		if !fc.mouseIsCaptured {
-			fc.resetMousePrevPosition()
-		}
-		return
-	}
+	// if kev.Key == window.KeySpace {
+	// 	fc.enableMouseCapture(!fc.mouseIsCaptured)
+	// 	if !fc.mouseIsCaptured {
+	// 		fc.resetMousePrevPosition()
+	// 	}
+	// 	return
+	// }
+
 	// find which movement the key corresponds to
 	var movement FlyMovement = -1
 	for m, k := range fc.Keys {
