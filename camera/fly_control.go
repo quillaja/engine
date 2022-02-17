@@ -11,45 +11,27 @@ import (
 	"github.com/g3n/engine/window"
 )
 
-// Notes:
-// fly camera allows user to move camera in "FPS" or "flight sim" style
-// movement.
-// - translation along 3 axes: forward/backward, up/down, left/right (strafe)
-// - rotation about 3 axes: roll, pitch, yaw
-// thus requires at least 12 inputs.
-// will also allow "zoom" (change fov), so +2 inputs.
-//
-// options
-// - look-spring - returns pitch to 0 deg when moving forward/backward
-//   - alternative: yaw about world up instead of camera up?
-// - mouse-look - captures cursor and makes mouse movements into pitch and yaw.
-// - invert pitch - inverts control of pitch so that normal "up" pitched "down", viceversa
-// - movements speeds
-// - buttons/etc
-// - rotation constraints
-//
-// internally, "right" will be +X, "up" will be +Y, and "forward" will be -Z
-// a right handed coordinate system mirroring OpenGL's camera conventions.
-
+// FlyMovement are the ways the camera can move.
 type FlyMovement int
 
 const (
-	Forward FlyMovement = iota
-	Backward
-	Right
-	Left
-	Up
-	Down
-	YawRight
-	YawLeft
-	PitchUp
-	PitchDown
-	RollRight
-	RollLeft
-	ZoomOut
-	ZoomIn
+	Forward   FlyMovement = iota // positive translation in the direction the camera is looking.
+	Backward                     // negative translation in the direction the camera is looking.
+	Right                        // right ("positive") translation from the camera's point of view.
+	Left                         // left ("negative") translation from the camera's point of view.
+	Up                           // upward ("positive") translation from the camera's point of view.
+	Down                         // downward ("negative") translation from the camera's point of view.
+	YawRight                     // "right" rotation from the camera's point of view.
+	YawLeft                      // "left" rotation from the camera's point of view.
+	PitchUp                      // "up" rotation from the camera's point of view.
+	PitchDown                    // "down" rotation from the camera's point of view.
+	RollRight                    // rotation "right" (CW) along the direction the camera is looking.
+	RollLeft                     // rotation "left" (CCW) along the direction the camera is looking.
+	ZoomOut                      // increase in the field of view.
+	ZoomIn                       // decrease in the field of view.
 )
 
+// MouseMotion are the ways a mouse can move.
 type MouseMotion int
 
 const (
@@ -64,17 +46,41 @@ const (
 	MouseScrollUp                // -Y
 )
 
+// MouseGuesture is an action performed with the mouse in a particular
+// direction (eg up) and with optional mouse buttons pressed.
+// Captured indicates if the MouseGuesture is active/valid only when the mouse is
+// captured by the window (indicated by calling SetMouseIsCaptured(true)).
 type MouseGuesture struct {
-	Motion   MouseMotion
-	Buttons  []window.MouseButton
-	Captured bool
-	// Keys    []window.Key
+	Motion   MouseMotion          // motion of the guesture
+	Buttons  []window.MouseButton // list of mouse buttons that must be pressed
+	Captured bool                 // guesture happens when mouse is captured by window
+	// Keys     []window.Key      // future use to specify keys (eg Ctrl+MouseUp)
 }
 
 const degrees = math32.Pi / 180.0
 const radians = 1.0 / degrees
 const twoPiOver64 = (2.0 * math32.Pi) / 64.0 // 5.625 deg
 
+// FlyControl provides a camera controller that allows looking at the scene from a first
+// person style view. It allows for translation in the Forward/Backward, Right/Left, and Up/Down
+// directions, and rotation in the Yaw/Pitch/Roll directions from the camera's point
+// of view. The camera's field of view can also be modified to allow ZoomOut/ZoomIn.
+//
+// For maximum flexibility, the FlyControl is very configurable, but two main modes
+// of operation exist: "manual" and "automatic".
+//
+// "Manual" mode requires the user to directly make adjustments to the FlyControl's
+// position and orientation by using the Forward(), Right(), Yaw(), Pitch() and other
+// similar methods. Manual mode does not subscribe to key or mouse events, nor does it
+// use the FlyControl's member maps "Speeds", "Keys", or "Mouse" ("Constraints" is
+// used). A FlyControl created (eg with NewFlyControl()) with no options defaults
+// to "manual" mode.
+//
+// "Automatic" mode subscribes to key and mouse events, and handles position and orientation
+// adjustments according to parameters specified in the "Keys", "Mouse", "Speed", and "Constraint"
+// maps. Generally, methods such as Forward() will not be used. Some preconfigured options
+// are available with FPSStyle() and FlightSimStyle(), and can be further configured by
+// the With*() options, and by modifying the FlyControl's Keys (etc) maps directly.
 type FlyControl struct {
 	core.Dispatcher         // Embedded event dispatcher
 	cam             *Camera // Controlled camera
@@ -85,82 +91,104 @@ type FlyControl struct {
 	up         math32.Vector3 // up direction of camera
 	upWorld    math32.Vector3 // The world up direction
 	useUpWorld bool           // true to use upWorld to do Up/Yaw/Pitch/Roll, false to use (camera) up
-	// TODO: delete forwardWorld math32.Vector3 // the original forward direction
 
 	mouseIsCaptured  bool           // indicates if the cursor is captured by the GL window
 	mousePrevPos     math32.Vector2 // used to determine mouse cursor movements
 	mouseBtnState    uint32         // bitfield. btn0 == 1, btn1 == 2, btn3 == 4 etc
-	mouseSensitivity float32        // modifies sensitivity of mouse cursor position changes
+	mouseSensitivity float32        // modifies sensitivity of mouse cursor position changes, in [0,1]
 
 	isKeySubscribed   bool // indicates status of keyboard event subscription
 	isMouseSubscribed bool // indicates status of mouse event subscription
 
 	// Constraints map.
+	// Specifies the maxium cumulative value in a particular movement.
 	// Translation movements aren't used.
-	// Angular contraints are in radians.
+	// Angular rotation contraints are in radians.
 	Constraints map[FlyMovement]float32
 
 	// Speeds map.
-	// Translation movements in units/event,
-	// angular movement and zoom in radians/event.
+	// Translation movements in units/event.
+	// Angular rotation and zoom in radians/event.
 	Speeds map[FlyMovement]float32
 
 	// Keys map.
+	// Maps a movment to a key press.
 	Keys map[FlyMovement]window.Key
 
 	// Mouse map.
+	// Maps a movement to a mouse "guesture"
+	// (a combination of mouse movement and optional mouse button).
 	Mouse map[FlyMovement]MouseGuesture
 }
 
+// FlyControlOption is a functional option when creating a new FlyControl.
 type FlyControlOption func(fc *FlyControl)
 
+// WithSpeeds provides a map of movement speeds for the FlyControl.
 func WithSpeeds(speeds map[FlyMovement]float32) FlyControlOption {
 	return func(fc *FlyControl) {
 		fc.Speeds = speeds
 	}
 }
 
+// WithKeys provides a map of movements to keys for the FlyControl.
 func WithKeys(keys map[FlyMovement]window.Key) FlyControlOption {
 	return func(fc *FlyControl) {
 		fc.Keys = keys
-		fc.subscribe(true, false)
+		fc.Subscribe(true, false)
 	}
 }
 
+// WithMouse provides a map of movements to mouse guestures for the FlyControl.
 func WithMouse(mouse map[FlyMovement]MouseGuesture) FlyControlOption {
 	return func(fc *FlyControl) {
 		fc.Mouse = mouse
-		fc.subscribe(false, true)
+		fc.Subscribe(false, true)
 	}
 }
 
+// WithConstraints provides a map of rotation (and FoV) constraints for the FlyControl.
 func WithConstraints(constraints map[FlyMovement]float32) FlyControlOption {
 	return func(fc *FlyControl) {
 		fc.Constraints = constraints
 	}
 }
 
+// FPSStyle configures the FlyControl with some default settings to make it act
+// similarly to most FPS style games.
+//
+// Yaw causes the camera to rotate around world up instead of camera up (IsUsingWorldUp()==true).
+// Forward/Backward/Right/Left is mapped to the WADS keys while Yaw and Pitch are mapped to the
+// arrow keys and also the mouse. Mouse look requires the user to left-click and hold. Pitch is
+// constrained between ±85 degrees, and FoV is constrained between 0 and 100 degrees.
+// The control subscribes to keyboard and mouse events.
+//
+// These settings can be altered by providing maps with WithKeys() etc functional
+// options in NewFlyControl(), or by altering the maps directly in the FlyControl
+// struct. This option should be listed before any of the With*() options.
 func FPSStyle() FlyControlOption {
 	return func(fc *FlyControl) {
 		fc.UseWorldUp(true)
 
+		// WADS style keys
 		WithKeys(map[FlyMovement]window.Key{
-			Forward:  window.KeyUp,
-			Backward: window.KeyDown,
-			Right:    window.KeyRight,
-			Left:     window.KeyLeft,
+			Forward:  window.KeyW,
+			Backward: window.KeyS,
+			Right:    window.KeyD,
+			Left:     window.KeyA,
 			// Up:        window.KeyPageUp,
 			// Down:      window.KeyPageDown,
-			YawRight:  window.KeyD,
-			YawLeft:   window.KeyA,
-			PitchUp:   window.KeyW,
-			PitchDown: window.KeyS,
+			YawRight:  window.KeyRight,
+			YawLeft:   window.KeyLeft,
+			PitchUp:   window.KeyUp,
+			PitchDown: window.KeyDown,
 			// RollRight: window.KeyE,
 			// RollLeft:  window.KeyQ,
 			ZoomOut: window.KeyMinus,
 			ZoomIn:  window.KeyEqual,
 		})(fc)
 
+		// click+hold to look with mouse
 		WithMouse(map[FlyMovement]MouseGuesture{
 			YawRight:  {Motion: MouseRight, Buttons: []window.MouseButton{window.MouseButtonLeft}},
 			YawLeft:   {Motion: MouseLeft, Buttons: []window.MouseButton{window.MouseButtonLeft}},
@@ -187,6 +215,7 @@ func FPSStyle() FlyControlOption {
 			ZoomIn:  -twoPiOver64,
 		})(fc)
 
+		// constrain pitch due to using world up
 		WithConstraints(map[FlyMovement]float32{
 			// YawRight:  45 * degrees,
 			// YawLeft:   -45 * degrees,
@@ -200,10 +229,23 @@ func FPSStyle() FlyControlOption {
 	}
 }
 
+// FlightSimStyle configures the FlyControl with some default settings to make it act
+// similarly to a airplane or spacecraft.
+//
+// Yaw causes the camera to rotate around camera up instead of world up (IsUsingWorldUp()==false).
+// Forward/Backward/Right/Left is mapped to the arrow keys while Yaw/Pitch/Roll are mapped to the
+// WADS and also the mouse. Mouse look requires the user to left-click and hold. There are no rotational
+// constraints, allowing the camera to perform manuvers such as loops and aileron rolls.
+// FoV is constrained between 0 and 100 degrees. The control subscribes to keyboard and mouse events.
+//
+// These settings can be altered by providing maps with WithKeys() etc functional
+// options in NewFlyControl(), or by altering the maps directly in the FlyControl
+// struct. This option should be listed before any of the With*() options.
 func FlightSimStyle() FlyControlOption {
 	return func(fc *FlyControl) {
 		fc.UseWorldUp(false)
 
+		// arrow keys for translation, WADS keys for rotation
 		WithKeys(map[FlyMovement]window.Key{
 			Forward:   window.KeyUp,
 			Backward:  window.KeyDown,
@@ -221,6 +263,7 @@ func FlightSimStyle() FlyControlOption {
 			ZoomIn:    window.KeyEqual,
 		})(fc)
 
+		// click+hold to look with mouse
 		WithMouse(map[FlyMovement]MouseGuesture{
 			YawRight:  {Motion: MouseRight, Buttons: []window.MouseButton{window.MouseButtonLeft}},
 			YawLeft:   {Motion: MouseLeft, Buttons: []window.MouseButton{window.MouseButtonLeft}},
@@ -247,6 +290,7 @@ func FlightSimStyle() FlyControlOption {
 			ZoomIn:    -twoPiOver64,
 		})(fc)
 
+		// no need to constrain rotation for flight sim style
 		WithConstraints(map[FlyMovement]float32{
 			// YawRight:  45 * degrees,
 			// YawLeft:   -45 * degrees,
@@ -260,6 +304,11 @@ func FlightSimStyle() FlyControlOption {
 	}
 }
 
+// NewFlyControl initalizes a FlyControl to manipulate cam. It starts positioned
+// at the cam's position, and oriented looking at target with camera's up aligned
+// in the direction of worldUp. Configuration options can be provided. The FlyControl
+// will default to "manual" mode if no options are given. See documentation for
+// FlyControl for more information about common usage patterns.
 func NewFlyControl(cam *Camera, target, worldUp *math32.Vector3,
 	options ...FlyControlOption) *FlyControl {
 
@@ -284,9 +333,10 @@ func NewFlyControl(cam *Camera, target, worldUp *math32.Vector3,
 	return fc
 }
 
-// subscribe to input events. A value of false for either key or mouse
-// does not unsubscribe from that type of event.
-func (fc *FlyControl) subscribe(key, mouse bool) {
+// Subscribe to input events. A value of false for either key or mouse
+// does not unsubscribe from that type of event. Multiple calls will subscribe
+// only once.
+func (fc *FlyControl) Subscribe(key, mouse bool) {
 	if key && !fc.isKeySubscribed {
 		gui.Manager().SubscribeID(window.OnKeyDown, fc, fc.onKey)
 		gui.Manager().SubscribeID(window.OnKeyRepeat, fc, fc.onKey)
@@ -303,16 +353,16 @@ func (fc *FlyControl) subscribe(key, mouse bool) {
 	}
 }
 
-// unsubscribe from input events.
-func (fc *FlyControl) unsubscribe(key, mouse bool) {
-	if key {
+// Unsubscribe from input events.
+func (fc *FlyControl) Unsubscribe(key, mouse bool) {
+	if key && fc.isKeySubscribed {
 		gui.Manager().UnsubscribeID(window.OnKeyDown, fc)
 		gui.Manager().UnsubscribeID(window.OnKeyRepeat, fc)
 		// gui.Manager().UnsubscribeID(window.OnKeyUp, fc)
 		fc.isKeySubscribed = false
 	}
 
-	if mouse {
+	if mouse && fc.isMouseSubscribed {
 		gui.Manager().UnsubscribeID(window.OnMouseUp, fc)
 		gui.Manager().UnsubscribeID(window.OnMouseDown, fc)
 		gui.Manager().UnsubscribeID(window.OnScroll, fc)
@@ -323,7 +373,7 @@ func (fc *FlyControl) unsubscribe(key, mouse bool) {
 
 // Dispose unsubscribes from all events.
 func (fc *FlyControl) Dispose() {
-	fc.unsubscribe(true, true)
+	fc.Unsubscribe(true, true)
 }
 
 // Reposition the camera to the new position.
@@ -339,19 +389,24 @@ func (fc *FlyControl) Reorient(target, worldUp *math32.Vector3) {
 	fc.forward.Copy(target.Clone().Sub(&fc.position).Normalize())
 	right := fc.forward.Clone().Cross(worldUp).Normalize()
 	fc.up.Copy(right.Clone().Cross(&fc.forward).Normalize())
-	// TODO: delete fc.forwardWorld.Copy(fc.upWorld.Clone().Cross(right).Normalize()) // horizontal forward world
 }
 
 // "getters"
 
+// GetPosition returns a copy of the camera's position.
 func (fc *FlyControl) GetPosition() (position math32.Vector3) {
 	return fc.position
 }
 
+// GetRotation returns a copy of the camera's cumulative rotation. Yaw, Pitch, and Roll
+// are in the X, Y, and Z coordinates.
 func (fc *FlyControl) GetRotation() (rotation math32.Vector3) {
 	return fc.rotation
 }
 
+// GetDirections returns copies of the camera's current "forward" and "up" direction.
+// The up direction is from the camera's perspective regardless of the status
+// of IsUsingWorldUp().
 func (fc *FlyControl) GetDirections() (forward, up math32.Vector3) {
 	return fc.forward, fc.up
 }
@@ -382,7 +437,8 @@ func (fc *FlyControl) Up(delta float32) {
 	fc.cam.SetPositionVec(&fc.position)
 }
 
-// Yaw adjustment in radians. Yaw rotates the camrea about the current "up" axis.
+// Yaw adjustment in radians. Yaw rotates the camera about the current "up" axis.
+// Positive yaw is "right" from the camera's point of view.
 func (fc *FlyControl) Yaw(delta float32) {
 	yaw := fc.rotation.X + delta
 	if fc.constraintOk(yaw, YawLeft, YawRight) {
@@ -399,6 +455,11 @@ func (fc *FlyControl) Yaw(delta float32) {
 }
 
 // Pitch adjustment in radians. Pitch rotates the camera about its right axis.
+//
+// Caution: If using world up, take care not to allow the camera's forward
+// direction to become parallel to the world up direction by setting constraints
+// on PitchUp and PitchDown to be in the interval (-π/2, π/2). If camera forward
+// and world up become parallel, NaNs will happen.
 func (fc *FlyControl) Pitch(delta float32) {
 	pitch := fc.rotation.Y + delta
 	if fc.constraintOk(pitch, PitchDown, PitchUp) {
@@ -470,9 +531,9 @@ func (fc *FlyControl) whichUp() *math32.Vector3 {
 // when calculating movements Up/Down, Yaw, Pitch, and Roll. Setting this to
 // false will use the "up" direction relative to the camera's point of view.
 //
-// Caution: if using world up, take care not to allow the camera's forward
-// direction to become parallel to the world up direction, by setting constraints
-// on PitchUp and Pitch to be in the interval (-pi/2, pi/2). If camera forward
+// Caution: If using world up, take care not to allow the camera's forward
+// direction to become parallel to the world up direction by setting constraints
+// on PitchUp and PitchDown to be in the interval (-π/2, π/2). If camera forward
 // and world up become parallel, NaNs will happen.
 func (fc *FlyControl) UseWorldUp(use bool) {
 	changed := fc.useUpWorld != use
@@ -504,6 +565,27 @@ func (fc *FlyControl) apply(movement FlyMovement, delta float32) {
 	case ZoomIn, ZoomOut:
 		fc.Zoom(delta)
 	}
+}
+
+// clamp and smoothly transition in [0,1]
+func smoothstep(x float32) float32 {
+	// https://en.wikipedia.org/wiki/Smoothstep
+	if x <= 0 {
+		return 0
+	}
+	if x >= 1 {
+		return 1
+	}
+	return 3*x*x - 2*x*x*x
+}
+
+// GetMouseSensitivity gets the current mouse sensitivity in [0,1].
+func (fc *FlyControl) GetMouseSensitivity() float32 { return fc.mouseSensitivity }
+
+// SetMouseSensitivity to value in [0,1]. Values outside of [0,1] are clamped
+// to that range.
+func (fc *FlyControl) SetMouseSensitivity(value float32) {
+	fc.mouseSensitivity = smoothstep(value)
 }
 
 // SetMouseIsCaptured is used to inform the FlyControl about the cursor
@@ -582,7 +664,7 @@ func (fc *FlyControl) onCursor(evname string, ev interface{}) {
 		}
 	}
 
-	// find then apply the appropriate MouseGuesture
+	// find then find and apply the appropriate MouseGuesture
 	for m, g := range fc.Mouse {
 		pressed := fc.mouseButtonsPressed(g.Buttons...)
 		captured := g.Captured == fc.mouseIsCaptured
@@ -622,7 +704,7 @@ func (fc *FlyControl) onScroll(evname string, ev interface{}) {
 		}
 	}
 
-	// find then apply the appropriate MouseGuesture
+	// find then find and apply the appropriate MouseGuesture
 	for m, g := range fc.Mouse {
 		pressed := fc.mouseButtonsPressed(g.Buttons...)
 		captured := g.Captured == fc.mouseIsCaptured
@@ -643,13 +725,6 @@ func (fc *FlyControl) onScroll(evname string, ev interface{}) {
 func (fc *FlyControl) onKey(evname string, ev interface{}) {
 
 	kev := ev.(*window.KeyEvent)
-
-	// TODO: remove testing stuff
-	// fmt.Println(kev)
-	// toggle up mode
-	// if kev.Key == window.KeySpace {
-	// 	fc.UseWorldUp(!fc.IsUsingWorldUp())
-	// }
 
 	// find which movement the key corresponds to
 	var movement FlyMovement = -1
