@@ -742,7 +742,3 @@ func (fc *FlyControl) onKey(evname string, ev interface{}) {
 	delta := fc.Speeds[movement]
 	fc.apply(movement, delta)
 }
-
-// onKeyUp is called when an OnKeyUp event is received.
-// func (fc *FlyControl) onKeyUp(evname string, ev interface{}) {
-// }
