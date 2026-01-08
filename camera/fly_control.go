@@ -340,7 +340,6 @@ func (fc *FlyControl) Subscribe(key, mouse bool) {
 	if key && !fc.isKeySubscribed {
 		gui.Manager().SubscribeID(window.OnKeyDown, fc, fc.onKey)
 		gui.Manager().SubscribeID(window.OnKeyRepeat, fc, fc.onKey)
-		// gui.Manager().SubscribeID(window.OnKeyUp, fc, fc.onKeyUp)
 		fc.isKeySubscribed = true
 	}
 
@@ -358,7 +357,6 @@ func (fc *FlyControl) Unsubscribe(key, mouse bool) {
 	if key && fc.isKeySubscribed {
 		gui.Manager().UnsubscribeID(window.OnKeyDown, fc)
 		gui.Manager().UnsubscribeID(window.OnKeyRepeat, fc)
-		// gui.Manager().UnsubscribeID(window.OnKeyUp, fc)
 		fc.isKeySubscribed = false
 	}
 
